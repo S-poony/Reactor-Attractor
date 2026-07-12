@@ -388,6 +388,11 @@ export default function App() {
   const [showTutorial, setShowTutorial] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [lastPlacedCell, setLastPlacedCell] = useState(null);
+  // Transient "ghost" snapshots of pieces the instant they're destroyed —
+  // { id, color, r, c } — used purely to render a brief destruction burst
+  // animation at the exact spot each piece vanished. Has no bearing on the
+  // authoritative `pieces` state or any game logic.
+  const [destroyingPieces, setDestroyingPieces] = useState([]);
   // Brief "+N" pop shown in the HUD whenever score increases
   const [scoreFlash, setScoreFlash] = useState(null); // { amount, key }
   const prevScoreRef = useRef(0);
@@ -513,6 +518,7 @@ export default function App() {
     setGameOverReason('');
     setIsResolving(false);
     setLastPlacedCell(null);
+    setDestroyingPieces([]);
     turnDestroyedGroupSizesRef.current = [];
     rollNextColor();
   };
@@ -569,6 +575,22 @@ export default function App() {
               const groupSize = nextPieces.filter((p) => p.groupId === gId).length;
               turnDestroyedGroupSizesRef.current.push(groupSize);
             });
+
+            // Snapshot the exact color/position of every piece about to be
+            // culled so a brief "destroyed" burst animation can play right
+            // where each one vanished, purely as a visual overlay layered on
+            // top — it has no bearing on the authoritative board state
+            // computed below.
+            const destroyedSnapshots = nextPieces
+              .filter((p) => escapedGroupIds.has(p.groupId))
+              .map((p) => ({ id: p.id, color: p.color, r: p.r, c: p.c }));
+            setDestroyingPieces((prev) => [...prev, ...destroyedSnapshots]);
+            setTimeout(() => {
+              setDestroyingPieces((prev) =>
+                prev.filter((d) => !destroyedSnapshots.some((s) => s.id === d.id))
+              );
+            }, 500);
+
             nextPieces = nextPieces.filter((p) => !escapedGroupIds.has(p.groupId));
             playSound('vanish');
           }
@@ -1178,6 +1200,38 @@ export default function App() {
                           </div>
                         </div>
                       ))}
+                    </div>
+
+                    {/* DESTRUCTION BURST LAYER — transient "ghost" pieces
+                        rendered at the exact spot (on-grid or drifted
+                        off-grid) where a piece vanished, purely a visual
+                        echo layered on top of the authoritative board
+                        state; see destroyingPieces state. */}
+                    <div className="absolute inset-0 pointer-events-none z-20">
+                      {destroyingPieces.map((d) => {
+                        const colorConfig = COLORS[d.color];
+                        const leftPercent = coordToStageCellUnits(d.c) * CELL_STAGE_PCT;
+                        const topPercent = coordToStageCellUnits(d.r) * CELL_STAGE_PCT;
+                        const isOnGrid = d.r >= 0 && d.r <= GRID_SIZE - 1 && d.c >= 0 && d.c <= GRID_SIZE - 1;
+                        const boxPercent = (isOnGrid ? ON_GRID_CELL_STAGE_UNITS : 1) * CELL_STAGE_PCT;
+                        return (
+                          <div
+                            key={`destroy-${d.id}`}
+                            className="absolute flex items-center justify-center"
+                            style={{ left: `${leftPercent}%`, top: `${topPercent}%`, width: `${boxPercent}%`, height: `${boxPercent}%` }}
+                          >
+                            <div className="relative w-full h-full flex items-center justify-center" style={{ padding: '4px' }}>
+                              <div
+                                className="absolute inset-0 rounded-full border-2 animate-piece-destroy-ring"
+                                style={{ borderColor: colorConfig?.hex }}
+                              />
+                              <div
+                                className={`w-full h-full rounded-full ${colorConfig?.bg} border-2 ${colorConfig?.border} animate-piece-destroy`}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </>
                 );
