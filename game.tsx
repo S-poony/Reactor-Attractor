@@ -896,14 +896,14 @@ export default function App() {
               <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
                 <span className="text-amber-400 font-mono font-bold text-xs block mb-1">RULE 3</span>
                 <p className="font-mono text-xs leading-relaxed">
-                  Attracted pieces <strong className="text-slate-100">slide and push</strong> obstacles in their way, even past pieces that don't attract them. Touching an attractor <strong className="text-slate-100">binds them together</strong>. Any piece pushed <strong className="text-slate-100">off the grid vanishes instantly</strong>, destroying its whole bound group. The game ends when there's <strong className="text-slate-100">no space left on the outer edge</strong> to place a new piece.
+                  Attracted pieces <strong className="text-slate-100">slide and push</strong> obstacles in their way, even past pieces that don't attract them. Touching an attractor <strong className="text-slate-100">binds them together</strong>. Any piece pushed <strong className="text-slate-100">off the grid vanishes instantly</strong>, destroying its whole bound group.
                 </p>
               </div>
 
               <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
                 <span className="text-amber-400 font-mono font-bold text-xs block mb-1">RULE 4</span>
                 <p className="font-mono text-xs leading-relaxed">
-                  Destroying pieces is how you score. Points scale up sharply with the size of the bound group destroyed at once, and destroying <strong className="text-slate-100">multiple groups in the same turn</strong> adds a combo multiplier on top. Losing pieces one at a time across several turns always scores worse than pushing a big group off together.
+                  Destroying pieces is how you score. Points scale up sharply with the size of the bound group destroyed at once, and destroying <strong className="text-slate-100">multiple groups in the same turn</strong> adds a combo multiplier on top. The game ends when there's <strong className="text-slate-100">no space left on the outer edge</strong> to place a new piece.
                 </p>
               </div>
             </div>
