@@ -264,128 +264,88 @@ const computeGroupPulls = (piecesList) => {
   return { groupInfo, validGroupPulls };
 };
 
-// Push mechanic: calculates recursive sliding shifts when one group pushes
-// others. Pure function of its params — lives at module level so it can be
-// shared between the real resolver and the live-overlay dry run below.
+// Simple push rule: a moving group can shove one neighboring group out of
+// the way, but it does not recursively chain through the whole board.
 const getPushSet = (startGroupId, dr, dc, currentPieces) => {
-  const pushSet = new Set([startGroupId]);
-  const queue = [startGroupId];
+  const affectedGroupIds = new Set([startGroupId]);
+  const startPieces = currentPieces.filter((p) => p.groupId === startGroupId);
 
-  while (queue.length > 0) {
-    const currGroupId = queue.shift();
-    const currGroupPieces = currentPieces.filter((p) => p.groupId === currGroupId);
+  startPieces.forEach((piece) => {
+    const nextR = piece.r + dr;
+    const nextC = piece.c + dc;
+    const blockingPiece = currentPieces.find((other) => other.r === nextR && other.c === nextC);
 
-    for (const p of currGroupPieces) {
-      const nextR = p.r + dr;
-      const nextC = p.c + dc;
-
-      // Find if there is another piece in the target cell
-      const blockingPiece = currentPieces.find((other) => other.r === nextR && other.c === nextC);
-      if (blockingPiece && blockingPiece.groupId !== currGroupId) {
-        if (!pushSet.has(blockingPiece.groupId)) {
-          pushSet.add(blockingPiece.groupId);
-          queue.push(blockingPiece.groupId);
-        }
-      }
+    if (blockingPiece && blockingPiece.groupId !== startGroupId) {
+      affectedGroupIds.add(blockingPiece.groupId);
     }
-  }
-  return Array.from(pushSet);
+  });
+
+  return Array.from(affectedGroupIds);
 };
 
 // Pure function: given the current board, works out exactly which group(s)
-// would actually move THIS tick and in which direction — the same
-// global-min-distance + conflict resolution runResolutionStep uses to
-// commit moves. Both the real resolver and the live arrow overlay call
-// this same function, so the overlay can never show a pull that isn't
-// actually the one about to fire.
+// would actually move THIS tick and in which direction. The resolver keeps
+// only claims that do not conflict with another claim and ignores the
+// heavier chain-reaction loop from the previous version.
 const resolveWinningPulls = (piecesList) => {
   const { validGroupPulls } = computeGroupPulls(piecesList);
   if (validGroupPulls.length === 0) return [];
 
-  // Every pull tied for the strongest (closest) distance on the board
-  // this tick is a *candidate* to move simultaneously. Two candidates
-  // conflict if they'd have to move the same group, or if their chains
-  // would land on the same cell. Conflicting pulls don't end the game —
-  // they freeze for this tick (extending the existing single-group
-  // tie-lock rule to the whole board), and we re-check the rest until
-  // the surviving set is fully conflict-free.
   const globalMinDist = Math.min(...validGroupPulls.map((p) => p.dist));
-  let candidatePulls = validGroupPulls.filter((p) => p.dist === globalMinDist);
-  let survivingClaims = [];
+  const candidatePulls = validGroupPulls.filter((p) => p.dist === globalMinDist);
 
-  let stable = false;
-  while (!stable && candidatePulls.length > 0) {
-    stable = true;
+  const claims = candidatePulls.map((pull) => ({
+    pull,
+    affectedGroupIds: getPushSet(pull.attractedGroupId, pull.dr, pull.dc, piecesList)
+  }));
 
-    // Work out each candidate's full push chain against the pre-move board.
-    const claims = candidatePulls.map((pull) => ({
-      pull,
-      affectedGroupIds: getPushSet(pull.attractedGroupId, pull.dr, pull.dc, piecesList)
-    }));
-
-    // Conflict A: two candidates disagree about which direction the same
-    // group should move (competing attractors pulling opposite ways, or a
-    // push chain running into a group that itself wants to go a different
-    // way). If every claim touching a group agrees on direction — e.g. a
-    // group's own closest pull happens to match the direction of an
-    // unrelated push chain dragging it along — that's not a real
-    // conflict, so it's allowed to proceed.
-    const groupDirClaims = {};
-    claims.forEach(({ pull, affectedGroupIds }) => {
-      const dirKey = `${pull.dr},${pull.dc}`;
-      affectedGroupIds.forEach((gId) => {
-        if (!groupDirClaims[gId]) groupDirClaims[gId] = new Set();
-        groupDirClaims[gId].add(dirKey);
-      });
+  const groupDirClaims = {};
+  claims.forEach(({ pull, affectedGroupIds }) => {
+    const dirKey = `${pull.dr},${pull.dc}`;
+    affectedGroupIds.forEach((gId) => {
+      if (!groupDirClaims[gId]) groupDirClaims[gId] = new Set();
+      groupDirClaims[gId].add(dirKey);
     });
-    const conflictedGroupIds = new Set(
-      Object.keys(groupDirClaims)
-        .filter((gId) => groupDirClaims[gId].size > 1)
-        .map(Number)
-    );
+  });
 
-    let survivors = claims.filter(
-      ({ affectedGroupIds }) => !affectedGroupIds.some((gId) => conflictedGroupIds.has(gId))
-    );
-    if (survivors.length !== claims.length) stable = false;
+  const conflictedGroupIds = new Set(
+    Object.keys(groupDirClaims)
+      .filter((gId) => groupDirClaims[gId].size > 1)
+      .map(Number)
+  );
 
-    // Conflict B: two surviving candidates land on the same cell even
-    // though their chains never overlapped beforehand (e.g. converging on
-    // the same empty cell from different directions).
-    if (survivors.length > 0) {
-      const tentative = [];
-      piecesList.forEach((p) => {
-        const claim = survivors.find((s) => s.affectedGroupIds.includes(p.groupId));
-        tentative.push(claim
-          ? { groupId: p.groupId, r: p.r + claim.pull.dr, c: p.c + claim.pull.dc }
-          : { groupId: p.groupId, r: p.r, c: p.c });
-      });
+  let survivors = claims.filter(
+    ({ affectedGroupIds }) => !affectedGroupIds.some((gId) => conflictedGroupIds.has(gId))
+  );
 
-      const occupied = {};
-      const collidingGroupIds = new Set();
-      tentative.forEach((p) => {
-        const key = `${p.r},${p.c}`;
-        if (occupied[key] !== undefined && occupied[key] !== p.groupId) {
-          collidingGroupIds.add(p.groupId);
-          collidingGroupIds.add(occupied[key]);
-        }
-        occupied[key] = p.groupId;
-      });
+  if (survivors.length > 0) {
+    const tentative = [];
+    piecesList.forEach((p) => {
+      const claim = survivors.find((s) => s.affectedGroupIds.includes(p.groupId));
+      tentative.push(claim
+        ? { groupId: p.groupId, r: p.r + claim.pull.dr, c: p.c + claim.pull.dc }
+        : { groupId: p.groupId, r: p.r, c: p.c });
+    });
 
-      if (collidingGroupIds.size > 0) {
-        const beforeCount = survivors.length;
-        survivors = survivors.filter(
-          ({ affectedGroupIds }) => !affectedGroupIds.some((gId) => collidingGroupIds.has(gId))
-        );
-        if (survivors.length !== beforeCount) stable = false;
+    const occupied = {};
+    const collidingGroupIds = new Set();
+    tentative.forEach((p) => {
+      const key = `${p.r},${p.c}`;
+      if (occupied[key] !== undefined && occupied[key] !== p.groupId) {
+        collidingGroupIds.add(p.groupId);
+        collidingGroupIds.add(occupied[key]);
       }
-    }
+      occupied[key] = p.groupId;
+    });
 
-    candidatePulls = survivors.map((s) => s.pull);
-    survivingClaims = survivors;
+    if (collidingGroupIds.size > 0) {
+      survivors = survivors.filter(
+        ({ affectedGroupIds }) => !affectedGroupIds.some((gId) => collidingGroupIds.has(gId))
+      );
+    }
   }
 
-  return survivingClaims; // [{ pull: {attractedGroupId, dr, dc, dist}, affectedGroupIds: [...] }]
+  return survivors;
 };
 
 export default function App() {
