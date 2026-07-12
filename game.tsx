@@ -1,23 +1,90 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react';
 import { Play, RotateCcw, HelpCircle, Trophy, Sparkles, AlertTriangle, ChevronRight, ChevronUp, Volume2, VolumeX } from 'lucide-react';
+
+// --- TYPES ---
+type ColorKey = 'R' | 'G' | 'B';
+
+interface ColorConfig {
+  name: string;
+  hex: string;
+  text: string;
+  bg: string;
+  border: string;
+}
+
+interface Piece {
+  id: number;
+  color: ColorKey;
+  r: number;
+  c: number;
+  groupId: number;
+}
+
+interface DestroyedPiece {
+  id: number;
+  color: ColorKey;
+  r: number;
+  c: number;
+}
+
+interface Pull {
+  attractedGroupId: number;
+  pieceId: number;
+  dr: number;
+  dc: number;
+  dist: number;
+  attractorId: number;
+}
+
+interface Dir {
+  dr: number;
+  dc: number;
+}
+
+interface GroupInfo {
+  groupId: number;
+  dist: number;
+  isTieLocked: boolean;
+  attractorIds: number[];
+  sensingPieceIds: number[];
+  dr: number;
+  dc: number;
+}
+
+interface ValidGroupPull {
+  attractedGroupId: number;
+  dr: number;
+  dc: number;
+  dist: number;
+}
+
+interface Claim {
+  pull: ValidGroupPull;
+  affectedGroupIds: number[];
+}
+
+interface ScoreFlash {
+  amount: number;
+  key: number;
+}
 
 // --- GAME CONFIG & CONSTANTS ---
 const GRID_SIZE = 8;
-const COLORS = {
+const COLORS: Record<ColorKey, ColorConfig> = {
   R: { name: 'Red', hex: '#EF4444', text: 'text-red-500', bg: 'bg-red-500', border: 'border-red-600' },
   G: { name: 'Green', hex: '#22C55E', text: 'text-green-500', bg: 'bg-green-500', border: 'border-green-600' },
   B: { name: 'Blue', hex: '#3B82F6', text: 'text-blue-500', bg: 'bg-blue-500', border: 'border-blue-600' },
 };
 
 // Attraction rules: Key attracts Value (Value is pulled towards Key)
-const ATTRACTION_RULES = {
+const ATTRACTION_RULES: Record<ColorKey, ColorKey> = {
   R: 'G', // Red attracts Green
   G: 'B', // Green attracts Blue
   B: 'R', // Blue attracts Red
 };
 
 // Check if a cell is on the 8x8 outer edge
-const isOuterEdge = (r, c) => {
+const isOuterEdge = (r: number, c: number): boolean => {
   return r === 0 || r === GRID_SIZE - 1 || c === 0 || c === GRID_SIZE - 1;
 };
 
@@ -36,7 +103,7 @@ const MAX_COORD = GRID_SIZE - 1 + BOUNDS_MARGIN;
 // simply fills the entire stage.
 const MAX_MARGIN_CELLS = 0;
 const OFFSET_SOFTNESS = 2.2;
-const compressedOffset = (trueDist) => (MAX_MARGIN_CELLS * trueDist) / (trueDist + OFFSET_SOFTNESS);
+const compressedOffset = (trueDist: number): number => (MAX_MARGIN_CELLS * trueDist) / (trueDist + OFFSET_SOFTNESS);
 
 // Total stage size in "cell units": the 8x8 board plus compression margin
 // on both sides. The bordered board itself only occupies GRID_BOX_SIZE_PCT
@@ -92,7 +159,7 @@ const PIECE_Z_BASE = 1000;
 // On-grid coords land on the true left/top edge of their rendered cell
 // (padding + gap included) instead of an idealized zero-gap grid, so
 // pieces sit centered on the cells you actually see.
-const coordToStageCellUnits = (coord) => {
+const coordToStageCellUnits = (coord: number): number => {
   if (coord >= 0 && coord <= GRID_SIZE - 1) {
     const leftFrac = BOARD_PAD_FRAC + coord * ON_GRID_STEP_FRAC;
     return MAX_MARGIN_CELLS + leftFrac * GRID_SIZE;
@@ -107,7 +174,7 @@ const coordToStageCellUnits = (coord) => {
 // True (uncompressed) distance past the board edge, in real grid cells —
 // drives shrink/fade/warning intensity so it still reads as "8 is the
 // cull line," even though the visual position itself is compressed.
-const trueDistPastEdge = (r, c) => {
+const trueDistPastEdge = (r: number, c: number): number => {
   const dr = r < 0 ? -r : r > GRID_SIZE - 1 ? r - (GRID_SIZE - 1) : 0;
   const dc = c < 0 ? -c : c > GRID_SIZE - 1 ? c - (GRID_SIZE - 1) : 0;
   return Math.max(dr, dc);
@@ -116,7 +183,7 @@ const trueDistPastEdge = (r, c) => {
 // dist=0 (on-grid) -> full size, opaque, no warning.
 // dist=BOUNDS_MARGIN (about to be culled) -> smallest/faintest, pulsing.
 const OFFGRID_WARNING_THRESHOLD = 6;
-const getPieceVisualStyle = (dist) => {
+const getPieceVisualStyle = (dist: number) => {
   const scale = 1 - 0.5 * (dist / (dist + 2));
   const opacity = 1 - 0.3 * (dist / (dist + 3));
   const warning = dist >= OFFGRID_WARNING_THRESHOLD;
@@ -124,7 +191,7 @@ const getPieceVisualStyle = (dist) => {
 };
 
 // Pure helper function to bind adjacent pieces that have attraction relationships
-const bindAdjacentPieces = (currentPieces) => {
+const bindAdjacentPieces = (currentPieces: Piece[]): { pieces: Piece[]; didBind: boolean } => {
   let didBind = false;
   const tempPieces = currentPieces.map(p => ({ ...p }));
 
@@ -170,7 +237,7 @@ const bindAdjacentPieces = (currentPieces) => {
 // pieces/empty cells, to find the nearest piece that actually attracts it.
 // Shared by the resolution engine and the live "who's attracting whom"
 // overlay, so both always agree on exactly the same rules.
-const findAttractorInDirection = (p, dr, dc, piecesList) => {
+const findAttractorInDirection = (p: Piece, dr: number, dc: number, piecesList: Piece[]): { target: Piece; dist: number } | null => {
   let currR = p.r + dr;
   let currC = p.c + dc;
   let dist = 0;
@@ -189,7 +256,7 @@ const findAttractorInDirection = (p, dr, dc, piecesList) => {
   return null;
 };
 
-const PULL_DIRS = [
+const PULL_DIRS: Dir[] = [
   { dr: -1, dc: 0 },
   { dr: 1, dc: 0 },
   { dr: 0, dc: -1 },
@@ -203,8 +270,8 @@ const PULL_DIRS = [
 //    while the board is idle or frozen in a tie-lock.
 //  - validGroupPulls: flattened list of groups with a single unambiguous
 //    closest pull — exactly what the resolution engine acts on.
-const computeGroupPulls = (piecesList) => {
-  const pulls = [];
+const computeGroupPulls = (piecesList: Piece[]): { groupInfo: Record<number, GroupInfo>; validGroupPulls: ValidGroupPull[] } => {
+  const pulls: Pull[] = [];
   piecesList.forEach((p) => {
     PULL_DIRS.forEach(({ dr, dc }) => {
       const found = findAttractorInDirection(p, dr, dc, piecesList);
@@ -214,22 +281,22 @@ const computeGroupPulls = (piecesList) => {
     });
   });
 
-  const byGroup = {};
+  const byGroup: Record<number, Pull[]> = {};
   pulls.forEach((pull) => {
     if (!byGroup[pull.attractedGroupId]) byGroup[pull.attractedGroupId] = [];
     byGroup[pull.attractedGroupId].push(pull);
   });
 
-  const groupInfo = {};
-  const validGroupPulls = [];
+  const groupInfo: Record<number, GroupInfo> = {};
+  const validGroupPulls: ValidGroupPull[] = [];
 
   Object.keys(byGroup).forEach((gId) => {
-    const groupList = byGroup[gId];
+    const groupList = byGroup[Number(gId)];
     groupList.sort((a, b) => a.dist - b.dist);
     const bestDist = groupList[0].dist;
     const ties = groupList.filter((p) => p.dist === bestDist);
 
-    const uniqueDirs = [];
+    const uniqueDirs: Dir[] = [];
     ties.forEach((t) => {
       if (!uniqueDirs.some((d) => d.dr === t.dr && d.dc === t.dc)) {
         uniqueDirs.push({ dr: t.dr, dc: t.dc });
@@ -244,7 +311,7 @@ const computeGroupPulls = (piecesList) => {
     // ends up plastered across every piece in the group.
     const sensingPieceIds = Array.from(new Set(ties.map((t) => t.pieceId)));
 
-    groupInfo[gId] = {
+    groupInfo[Number(gId)] = {
       groupId: Number(gId),
       dist: bestDist,
       isTieLocked,
@@ -264,8 +331,8 @@ const computeGroupPulls = (piecesList) => {
 
 // Simple push rule: a moving group can shove one neighboring group out of
 // the way, but it does not recursively chain through the whole board.
-const getPushSet = (startGroupId, dr, dc, currentPieces) => {
-  const affectedGroupIds = new Set([startGroupId]);
+const getPushSet = (startGroupId: number, dr: number, dc: number, currentPieces: Piece[]): number[] => {
+  const affectedGroupIds = new Set<number>([startGroupId]);
   const startPieces = currentPieces.filter((p) => p.groupId === startGroupId);
 
   startPieces.forEach((piece) => {
@@ -285,19 +352,19 @@ const getPushSet = (startGroupId, dr, dc, currentPieces) => {
 // would actually move THIS tick and in which direction. The resolver keeps
 // only claims that do not conflict with another claim and ignores the
 // heavier chain-reaction loop from the previous version.
-const resolveWinningPulls = (piecesList) => {
+const resolveWinningPulls = (piecesList: Piece[]): Claim[] => {
   const { validGroupPulls } = computeGroupPulls(piecesList);
   if (validGroupPulls.length === 0) return [];
 
   const globalMinDist = Math.min(...validGroupPulls.map((p) => p.dist));
   const candidatePulls = validGroupPulls.filter((p) => p.dist === globalMinDist);
 
-  const claims = candidatePulls.map((pull) => ({
+  const claims: Claim[] = candidatePulls.map((pull) => ({
     pull,
     affectedGroupIds: getPushSet(pull.attractedGroupId, pull.dr, pull.dc, piecesList)
   }));
 
-  const groupDirClaims = {};
+  const groupDirClaims: Record<number, Set<string>> = {};
   claims.forEach(({ pull, affectedGroupIds }) => {
     const dirKey = `${pull.dr},${pull.dc}`;
     affectedGroupIds.forEach((gId) => {
@@ -308,7 +375,7 @@ const resolveWinningPulls = (piecesList) => {
 
   const conflictedGroupIds = new Set(
     Object.keys(groupDirClaims)
-      .filter((gId) => groupDirClaims[gId].size > 1)
+      .filter((gId) => groupDirClaims[Number(gId)].size > 1)
       .map(Number)
   );
 
@@ -317,7 +384,7 @@ const resolveWinningPulls = (piecesList) => {
   );
 
   if (survivors.length > 0) {
-    const tentative = [];
+    const tentative: { groupId: number; r: number; c: number }[] = [];
     piecesList.forEach((p) => {
       const claim = survivors.find((s) => s.affectedGroupIds.includes(p.groupId));
       tentative.push(claim
@@ -325,8 +392,8 @@ const resolveWinningPulls = (piecesList) => {
         : { groupId: p.groupId, r: p.r, c: p.c });
     });
 
-    const occupied = {};
-    const collidingGroupIds = new Set();
+    const occupied: Record<string, number> = {};
+    const collidingGroupIds = new Set<number>();
     tentative.forEach((p) => {
       const key = `${p.r},${p.c}`;
       if (occupied[key] !== undefined && occupied[key] !== p.groupId) {
@@ -364,7 +431,7 @@ const COMBO_MULTIPLIER_STEP = 0.25;
 // least N turns to rack up the same piece count. Destroying several
 // separate groups within the same turn is rewarded too, but more
 // modestly, via a flat multiplier applied to the turn's combined total.
-const computeDestructionScore = (groupSizes) => {
+const computeDestructionScore = (groupSizes: number[]): number => {
   if (groupSizes.length === 0) return 0;
   const basePoints = groupSizes.reduce(
     (sum, n) => sum + (BASE_POINTS_PER_PIECE * n * (n + 1)) / 2,
@@ -376,8 +443,8 @@ const computeDestructionScore = (groupSizes) => {
 
 export default function App() {
   // --- STATE ---
-  const [pieces, setPieces] = useState([]); // List of { id, color, r, c, groupId }
-  const [nextColor, setNextColor] = useState('R');
+  const [pieces, setPieces] = useState<Piece[]>([]); // List of { id, color, r, c, groupId }
+  const [nextColor, setNextColor] = useState<ColorKey>('R');
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(() => {
     return Number(localStorage.getItem('attractors_high_score')) || 0;
@@ -387,14 +454,14 @@ export default function App() {
   const [gameOverReason, setGameOverReason] = useState('');
   const [showTutorial, setShowTutorial] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [lastPlacedCell, setLastPlacedCell] = useState(null);
+  const [lastPlacedCell, setLastPlacedCell] = useState<{ r: number; c: number } | null>(null);
   // Transient "ghost" snapshots of pieces the instant they're destroyed —
   // { id, color, r, c } — used purely to render a brief destruction burst
   // animation at the exact spot each piece vanished. Has no bearing on the
   // authoritative `pieces` state or any game logic.
-  const [destroyingPieces, setDestroyingPieces] = useState([]);
+  const [destroyingPieces, setDestroyingPieces] = useState<DestroyedPiece[]>([]);
   // Brief "+N" pop shown in the HUD whenever score increases
-  const [scoreFlash, setScoreFlash] = useState(null); // { amount, key }
+  const [scoreFlash, setScoreFlash] = useState<ScoreFlash | null>(null); // { amount, key }
   const prevScoreRef = useRef(0);
 
   // For generating unique IDs
@@ -405,12 +472,12 @@ export default function App() {
   // trigger several resolution ticks before control returns to the
   // player). Reset at the start of each turn and scored as a whole once
   // the cascade settles — see computeDestructionScore.
-  const turnDestroyedGroupSizesRef = useRef([]);
+  const turnDestroyedGroupSizesRef = useRef<number[]>([]);
 
   // Single reused AudioContext (browsers cap the number of concurrent
   // contexts, so creating a new one per sound effect breaks audio after
   // enough placements)
-  const audioCtxRef = useRef(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
   // Initialize first color
   useEffect(() => {
@@ -447,13 +514,15 @@ export default function App() {
   }, [score]);
 
   // Audio Synth triggers for feedback
-  const playSound = (type) => {
+  const playSound = (type: string) => {
     if (!soundEnabled) return;
     try {
       if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtxRef.current = new AudioContextClass();
       }
       const ctx = audioCtxRef.current;
+      if (!ctx) return;
       if (ctx.state === 'suspended') {
         ctx.resume();
       }
@@ -506,7 +575,7 @@ export default function App() {
   };
 
   const rollNextColor = () => {
-    const colors = ['R', 'G', 'B'];
+    const colors: ColorKey[] = ['R', 'G', 'B'];
     const randomColor = colors[Math.floor(Math.random() * colors.length)];
     setNextColor(randomColor);
   };
@@ -524,12 +593,12 @@ export default function App() {
   };
 
   // Helper to find piece at specific coordinates
-  const getPieceAt = useCallback((r, c, list = pieces) => {
+  const getPieceAt = useCallback((r: number, c: number, list: Piece[] = pieces) => {
     return list.find((p) => p.r === r && p.c === c);
   }, [pieces]);
 
   // Main attraction calculation and single step execution
-  const runResolutionStep = useCallback(async (currentPieces) => {
+  const runResolutionStep = useCallback(async (currentPieces: Piece[]) => {
     let hasMovement = false;
     let nextPieces = [...currentPieces];
 
@@ -542,7 +611,7 @@ export default function App() {
     const survivingClaims = resolveWinningPulls(nextPieces);
 
     if (survivingClaims.length > 0) {
-          const moveByGroupId = {};
+          const moveByGroupId: Record<number, Dir> = {};
           survivingClaims.forEach(({ pull, affectedGroupIds }) => {
             affectedGroupIds.forEach((gId) => {
               moveByGroupId[gId] = { dr: pull.dr, dc: pull.dc };
@@ -581,7 +650,7 @@ export default function App() {
             // where each one vanished, purely as a visual overlay layered on
             // top — it has no bearing on the authoritative board state
             // computed below.
-            const destroyedSnapshots = nextPieces
+            const destroyedSnapshots: DestroyedPiece[] = nextPieces
               .filter((p) => escapedGroupIds.has(p.groupId))
               .map((p) => ({ id: p.id, color: p.color, r: p.r, c: p.c }));
             setDestroyingPieces((prev) => [...prev, ...destroyedSnapshots]);
@@ -646,7 +715,7 @@ export default function App() {
   }, [soundEnabled]);
 
   // Click handler to place active piece on the board
-  const handleCellClick = (r, c) => {
+  const handleCellClick = (r: number, c: number) => {
     if (isResolving || gameOver) return;
     if (!isOuterEdge(r, c)) return;
 
@@ -655,7 +724,7 @@ export default function App() {
 
     playSound('place');
     const newPieceId = pieceIdCounter.current++;
-    const newPiece = {
+    const newPiece: Piece = {
       id: newPieceId,
       color: nextColor,
       r,
@@ -692,7 +761,7 @@ export default function App() {
   };
 
   // Determine connections between pieces of the same group for visuals
-  const hasNeighborInGroup = (piece, dir) => {
+  const hasNeighborInGroup = (piece: Piece, dir: 'up' | 'down' | 'left' | 'right') => {
     let checkR = piece.r;
     let checkC = piece.c;
     if (dir === 'up') checkR--;
@@ -707,9 +776,9 @@ export default function App() {
   // Live "who's attracting whom" state, recomputed from the current board
   // any time it changes — including while idle and while frozen in a
   // tie-lock, which is exactly when this is most useful to see.
-  const attractionState = useMemo(() => computeGroupPulls(pieces).groupInfo, [pieces]);
+  const attractionState = useMemo<Record<number, GroupInfo>>(() => computeGroupPulls(pieces).groupInfo, [pieces]);
   const attractingPieceIds = useMemo(() => {
-    const ids = new Set();
+    const ids = new Set<number>();
     Object.values(attractionState).forEach((info) => {
       info.attractorIds.forEach((id) => ids.add(id));
     });
@@ -722,8 +791,8 @@ export default function App() {
   // (present in attractionState) without being the one that wins the
   // board-wide race, so the arrow overlay checks this instead of just
   // "does this group have any pull at all."
-  const winningPullByGroupId = useMemo(() => {
-    const map = {};
+  const winningPullByGroupId = useMemo<Record<number, Dir>>(() => {
+    const map: Record<number, Dir> = {};
     resolveWinningPulls(pieces).forEach(({ pull }) => {
       // Only the originally-attracted group gets an arrow — groups merely
       // dragged along via a push chain didn't sense anything themselves.
@@ -1071,7 +1140,7 @@ export default function App() {
                   const winningPull = winningPullByGroupId[p.groupId];
                   const hasDirectionalPull = !isGroupTieLocked && !!winningPull && isSensingPiece;
 
-                  const arrowStyle = hasDirectionalPull
+                  const arrowStyle: CSSProperties | null = hasDirectionalPull && winningPull
                     ? winningPull.dr === -1
                       ? { top: '-7px', left: '50%', transform: 'translateX(-50%) rotate(0deg)' }
                       : winningPull.dr === 1
@@ -1181,7 +1250,7 @@ export default function App() {
                               {hasDirectionalPull && (
                                 <div
                                   className="absolute w-4 h-4 rounded-full bg-slate-900 border border-slate-600 flex items-center justify-center"
-                                  style={arrowStyle}
+                                  style={arrowStyle ?? undefined}
                                 >
                                   <ChevronUp size={10} className="text-slate-200" />
                                 </div>
