@@ -21,22 +21,20 @@ const isOuterEdge = (r, c) => {
   return r === 0 || r === GRID_SIZE - 1 || c === 0 || c === GRID_SIZE - 1;
 };
 
-// How far a piece is allowed to drift past the visible board before it's
-// culled. Any genuinely finite push chain resolves (binds, stabilizes, or
-// gets pulled back by a stronger attractor) well within one board-width of
-// the edge; anything still going after that is a runaway chain pushing its
-// own target away forever and is removed instead of ending the game.
-const BOUNDS_MARGIN = GRID_SIZE;
+// Pieces are culled the instant they leave the visible board — no drift
+// buffer past the edge. MIN_COORD/MAX_COORD line up exactly with the
+// board's own bounds as a result.
+const BOUNDS_MARGIN = 0;
 const MIN_COORD = -BOUNDS_MARGIN;
 const MAX_COORD = GRID_SIZE - 1 + BOUNDS_MARGIN;
 
 // --- OFF-GRID VISUAL COMPRESSION ---
-// Pieces can drift up to BOUNDS_MARGIN (8) cells past the board edge before
-// being culled. Rendering that 1:1 would need a stage 3x the board's size,
-// which kills legibility on small screens. Instead, visual distance past
-// the edge grows on a saturating curve — it approaches but never exceeds
-// MAX_MARGIN_CELLS, no matter how far the true (culling) distance gets.
-const MAX_MARGIN_CELLS = 1.4;
+// Historically pieces could drift past the edge before being culled, so
+// this reserved a compressed rendering margin around the board for them.
+// Pieces now vanish the instant they leave the grid, so there's nothing
+// left to render out there — the margin collapses to 0 and the board box
+// simply fills the entire stage.
+const MAX_MARGIN_CELLS = 0;
 const OFFSET_SOFTNESS = 2.2;
 const compressedOffset = (trueDist) => (MAX_MARGIN_CELLS * trueDist) / (trueDist + OFFSET_SOFTNESS);
 
@@ -348,6 +346,34 @@ const resolveWinningPulls = (piecesList) => {
   return survivors;
 };
 
+// --- SCORING ---
+// Base points awarded per piece in a destroyed group, before the
+// triangular group-size scaling and multi-group combo multiplier below.
+const BASE_POINTS_PER_PIECE = 10;
+// Extra multiplier added per additional group destroyed within the same
+// turn (e.g. 3 separate single-piece groups destroyed together nets a
+// 1 + 0.25*2 = 1.5x multiplier on their combined base total).
+const COMBO_MULTIPLIER_STEP = 0.25;
+
+// Turns a list of destroyed-group sizes (piece counts) from a single
+// turn's resolution cascade into that turn's score. Each group's points
+// scale TRIANGULARLY with its size (n*(n+1)/2) rather than linearly, so a
+// single bound group of N pieces destroyed together is always worth
+// strictly more than N pieces trickling off the board one at a time
+// across N separate turns — even though the latter necessarily takes at
+// least N turns to rack up the same piece count. Destroying several
+// separate groups within the same turn is rewarded too, but more
+// modestly, via a flat multiplier applied to the turn's combined total.
+const computeDestructionScore = (groupSizes) => {
+  if (groupSizes.length === 0) return 0;
+  const basePoints = groupSizes.reduce(
+    (sum, n) => sum + (BASE_POINTS_PER_PIECE * n * (n + 1)) / 2,
+    0
+  );
+  const comboMultiplier = 1 + COMBO_MULTIPLIER_STEP * (groupSizes.length - 1);
+  return Math.round(basePoints * comboMultiplier);
+};
+
 export default function App() {
   // --- STATE ---
   const [pieces, setPieces] = useState([]); // List of { id, color, r, c, groupId }
@@ -368,6 +394,13 @@ export default function App() {
 
   // For generating unique IDs
   const pieceIdCounter = useRef(0);
+
+  // Accumulates the size (piece count) of every group destroyed so far
+  // during the CURRENT turn's resolution cascade (a single placement can
+  // trigger several resolution ticks before control returns to the
+  // player). Reset at the start of each turn and scored as a whole once
+  // the cascade settles — see computeDestructionScore.
+  const turnDestroyedGroupSizesRef = useRef([]);
 
   // Single reused AudioContext (browsers cap the number of concurrent
   // contexts, so creating a new one per sound effect breaks audio after
@@ -480,6 +513,7 @@ export default function App() {
     setGameOverReason('');
     setIsResolving(false);
     setLastPlacedCell(null);
+    turnDestroyedGroupSizesRef.current = [];
     rollNextColor();
   };
 
@@ -509,8 +543,6 @@ export default function App() {
             });
           });
 
-          const movedCount = nextPieces.filter((p) => moveByGroupId[p.groupId]).length;
-
           nextPieces = nextPieces.map((p) => {
             const move = moveByGroupId[p.groupId];
             if (move) {
@@ -518,27 +550,25 @@ export default function App() {
             }
             return p;
           });
-
-          // Score: 1 point per piece that moved this tick, so a bound group of
-          // 5 sliding (or several unrelated groups sliding at once) scores
-          // more than a single piece nudging over.
-          setScore((prev) => prev + movedCount);
-
           playSound('slide');
           hasMovement = true;
 
-          // Cull any group that has drifted more than BOUNDS_MARGIN cells
-          // past the visible board. A legitimate, finite push has plenty of
-          // room to bind or stabilize within that buffer; anything still
-          // going after that is a runaway chain (e.g. pushing its own
-          // target away every tick) and gets removed instead of ending the
-          // game outright.
+          // Cull any group with a piece that has left the visible board —
+          // pieces vanish the instant they cross the edge, and the whole
+          // bound group goes with them. Each destroyed group's size is
+          // tallied for this turn's score (see computeDestructionScore),
+          // so losing a big bound group all at once is always worth more
+          // than losing the same pieces individually across several turns.
           const escapedGroupIds = new Set(
             nextPieces
               .filter((p) => p.r < MIN_COORD || p.r > MAX_COORD || p.c < MIN_COORD || p.c > MAX_COORD)
               .map((p) => p.groupId)
           );
           if (escapedGroupIds.size > 0) {
+            escapedGroupIds.forEach((gId) => {
+              const groupSize = nextPieces.filter((p) => p.groupId === gId).length;
+              turnDestroyedGroupSizesRef.current.push(groupSize);
+            });
             nextPieces = nextPieces.filter((p) => !escapedGroupIds.has(p.groupId));
             playSound('vanish');
           }
@@ -566,6 +596,14 @@ export default function App() {
     } else {
       // Done resolving, return control to player
       setIsResolving(false);
+      // Turn complete — tally every group destroyed across this whole
+      // cascade (it can span several resolution ticks) into one turn
+      // score, applying the size/combo scaling from computeDestructionScore.
+      const turnScore = computeDestructionScore(turnDestroyedGroupSizesRef.current);
+      if (turnScore > 0) {
+        setScore((prev) => prev + turnScore);
+      }
+      turnDestroyedGroupSizesRef.current = [];
       // Check if board outer edge has absolutely no empty spaces
       let freeOuterCellExists = false;
       for (let r = 0; r < GRID_SIZE; r++) {
@@ -620,6 +658,9 @@ export default function App() {
     setLastPlacedCell({ r, c });
 
     // Lock board and trigger resolution cascade
+    // Starting a new turn — clear last turn's destroyed-group tally so
+    // this turn's score is computed fresh once its cascade settles.
+    turnDestroyedGroupSizesRef.current = [];
     setIsResolving(true);
     rollNextColor();
 
@@ -726,7 +767,7 @@ export default function App() {
               </button>
             </div>
             
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm text-slate-300">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 text-sm text-slate-300">
               <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
                 <span className="text-amber-400 font-mono font-bold text-xs block mb-1">RULE 1</span>
                 <p className="font-mono text-xs leading-relaxed">
@@ -764,7 +805,14 @@ export default function App() {
               <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
                 <span className="text-amber-400 font-mono font-bold text-xs block mb-1">RULE 3</span>
                 <p className="font-mono text-xs leading-relaxed">
-                  Attracted pieces <strong className="text-slate-100">slide and push</strong> obstacles in their way, even past pieces that don't attract them. Touching an attractor <strong className="text-slate-100">binds them together</strong>. The game ends when there's <strong className="text-slate-100">no space left on the outer edge</strong> to place a new piece.
+                  Attracted pieces <strong className="text-slate-100">slide and push</strong> obstacles in their way, even past pieces that don't attract them. Touching an attractor <strong className="text-slate-100">binds them together</strong>. Any piece pushed <strong className="text-slate-100">off the grid vanishes instantly</strong>, destroying its whole bound group. The game ends when there's <strong className="text-slate-100">no space left on the outer edge</strong> to place a new piece.
+                </p>
+              </div>
+
+              <div className="bg-slate-950 p-4 rounded-lg border border-slate-800">
+                <span className="text-amber-400 font-mono font-bold text-xs block mb-1">RULE 4</span>
+                <p className="font-mono text-xs leading-relaxed">
+                  Destroying pieces is how you score. Points scale up sharply with the size of the bound group destroyed at once, and destroying <strong className="text-slate-100">multiple groups in the same turn</strong> adds a combo multiplier on top. Losing pieces one at a time across several turns always scores worse than pushing a big group off together.
                 </p>
               </div>
             </div>
@@ -790,7 +838,7 @@ export default function App() {
             
             <div className="flex justify-between items-baseline">
               <span className="text-3xl font-mono font-black text-slate-100">{score}</span>
-              <span className="text-xs text-slate-500 font-mono">tiles moved</span>
+              <span className="text-xs text-slate-500 font-mono">points scored</span>
             </div>
           </div>
 
@@ -868,9 +916,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* STAGE — deliberately larger than the visible board. Off-grid
-              pieces (up to BOUNDS_MARGIN cells out) render into the margin
-              at compressed scale instead of being invisibly clipped. */}
+          {/* STAGE — same size as the board now that pieces vanish the
+              instant they leave the grid; no drift margin needed. */}
           <div className="relative w-full max-w-lg aspect-square">
 
             {/* Bordered board box — inset within the stage, still clips its
